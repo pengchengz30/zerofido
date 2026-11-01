@@ -281,12 +281,18 @@ static bool zf_transport_nfc_send_ctap2_direct(ZerofidoApp *app, ZfNfcTransportS
     }
     furi_mutex_release(app->ui_mutex);
 
+#if defined(ZF_RELEASE_DIAGNOSTICS) && ZF_RELEASE_DIAGNOSTICS
+    const uint32_t direct_started = furi_get_tick();
+#endif
     if (response && response_capacity > 1U) {
         response_len = zerofido_handle_ctap2(
             app, state->session_id, request_copy, request_len, response,
             response_capacity > ZF_MAX_MSG_SIZE ? ZF_MAX_MSG_SIZE : response_capacity);
         zerofido_ui_refresh_status(app);
     }
+    zf_transport_nfc_trace_format("direct-done ticks=%lu len=%u sid=%lu",
+        (unsigned long)(furi_get_tick() - direct_started), (unsigned)response_len,
+        (unsigned long)state->session_id);
 
     furi_mutex_acquire(app->ui_mutex, FuriWaitForever);
     app->transport_auto_accept_transaction = old_auto_accept;
@@ -304,11 +310,11 @@ static bool zf_transport_nfc_send_ctap2_direct(ZerofidoApp *app, ZfNfcTransportS
         return zf_transport_nfc_send_status_word(state, ZF_NFC_SW_INTERNAL_ERROR);
     }
     if (response_len + 2U <= ZF_NFC_MAX_TX_FRAME_INF_SIZE) {
-        const bool sent =
-            zf_transport_nfc_send_apdu_payload(state, response, response_len, ZF_NFC_SW_SUCCESS);
+        const bool handled = zf_transport_nfc_send_recoverable_apdu_payload(
+            state, response, response_len, ZF_NFC_SW_SUCCESS);
         zf_app_transport_arena_release(app);
         zf_transport_nfc_attach_arena(state, NULL, 0U);
-        return sent;
+        return handled;
     }
 
     if (request_was_extended_apdu) {

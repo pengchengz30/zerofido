@@ -3162,3 +3162,88 @@ static void test_nfc_selected_raw_native_probe_traces_selected_state(void) {
     bit_buffer_free(buffer);
     test_nfc_deinit_app(&app);
 }
+
+/* Exercise the real listener callback, not just the APDU helper. */
+static void test_nfc_direct_tx_failure_recovery(void) {
+    const size_t lengths[] = {2U, 214U, ZF_NFC_MAX_TX_FRAME_INF_SIZE - 2U};
+    for (size_t size_index = 0U; size_index < sizeof(lengths) / sizeof(lengths[0]); ++size_index) {
+        for (unsigned recovery = 0U; recovery < 4U; ++recovery) {
+            ZerofidoApp app;
+            FuriMutex mutex = {0};
+            Iso14443_4aListener listener = {0};
+            BitBuffer *buffer = bit_buffer_alloc(32U);
+            Iso14443_4aListenerEventData event_data = {.buffer = buffer};
+            Iso14443_4aListenerEvent listener_event = {
+                .type = Iso14443_4aListenerEventTypeReceivedData, .data = &event_data,
+            };
+            NfcGenericEvent event = {
+                .protocol = NfcProtocolIso14443_4a, .instance = &listener,
+                .event_data = &listener_event,
+            };
+            uint8_t request[] = {0x02, 0x80, 0x10, 0x00, 0x00, 0x00, 0x00, 0x01,
+                                  ZfCtapeCmdClientPin, 0x00, 0x00};
+            uint8_t expected[sizeof(g_last_nfc_tx)] = {0};
+            size_t expected_len = 0U;
+
+            test_reset();
+            test_nfc_init_app(&app, &mutex);
+            test_nfc_select_applet(&app);
+            ZfNfcTransportState *state = &app.transport_nfc_state_storage;
+            g_ctap2_large_response_len = lengths[size_index];
+            g_nfc_tx_result = NfcErrorGeneric;
+            bit_buffer_append_bytes(buffer, request, sizeof(request));
+            zf_transport_nfc_event_callback(event, &app);
+            expected_len = g_last_nfc_tx_len;
+            memcpy(expected, g_last_nfc_tx, expected_len);
+            expect(g_ctap2_call_count == 1U, "failed TX must execute CTAP exactly once");
+            expect(state->iso4_last_tx_valid && state->rx_complete_last_valid,
+                   "failed direct response must retain both recovery caches");
+            expect(state->iso4_last_tx_len + 2U == expected_len &&
+                       memcmp(state->iso4_last_tx, expected, expected_len - 2U) == 0,
+                   "cache must contain failed response, not the previous SELECT");
+            expect(app.transport_arena == NULL, "retained frame must outlive released arena");
+            expect(test_log_contains("tx-fail err=1") && test_log_contains("direct-retained"),
+                   "failed TX must expose error and retained-response diagnostics");
+
+            if (recovery == 3U) {
+                zf_transport_nfc_on_disconnect(&app);
+                expect(!state->iso4_last_tx_valid && !state->rx_complete_last_valid,
+                       "field loss must erase retained response and duplicate request");
+                g_nfc_tx_result = NfcErrorNone;
+                test_nfc_select_applet(&app);
+                zf_transport_nfc_event_callback(event, &app);
+                expect(g_ctap2_call_count == 2U,
+                       "fresh session must execute request instead of replaying old response");
+            } else {
+                bit_buffer_reset(buffer);
+                if (recovery == 0U) {
+                    bit_buffer_append_bytes(buffer, request, sizeof(request));
+                } else {
+                    const uint8_t retry = recovery == 1U ? 0xB2U : 0x02U;
+                    bit_buffer_append_bytes(buffer, &retry, 1U);
+                }
+                /* A second TX failure must not consume the retry cache. */
+                zf_transport_nfc_event_callback(event, &app);
+                expect(g_ctap2_call_count == 1U, "failed retry must not rerun CTAP");
+                expect(g_last_nfc_tx_len == expected_len &&
+                           memcmp(g_last_nfc_tx, expected, expected_len) == 0,
+                       "failed retry must attempt exact response bytes");
+                g_nfc_tx_result = NfcErrorNone;
+                zf_transport_nfc_event_callback(event, &app);
+                expect(g_ctap2_call_count == 1U, "successful retry must not rerun CTAP");
+                expect(g_last_nfc_tx_len == expected_len &&
+                           memcmp(g_last_nfc_tx, expected, expected_len) == 0,
+                       "successful retry must preserve response and block number");
+                expect(state->iso_pcb == 0x03U, "retry must not toggle PCB twice");
+                request[0] = 0x03U;
+                bit_buffer_reset(buffer);
+                bit_buffer_append_bytes(buffer, request, sizeof(request));
+                zf_transport_nfc_event_callback(event, &app);
+                expect(g_ctap2_call_count == 2U, "next block number must dispatch new request");
+                expect(g_last_nfc_tx[0] == 0x03U, "new response must use next block number");
+            }
+            bit_buffer_free(buffer);
+            test_nfc_deinit_app(&app);
+        }
+    }
+}

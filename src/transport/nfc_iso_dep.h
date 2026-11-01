@@ -45,6 +45,11 @@ bool zf_transport_nfc_send_iso_response_preserving_replay(ZfNfcTransportState *s
 bool zf_transport_nfc_send_r_ack(ZfNfcTransportState *state, uint8_t pcb);
 bool zf_transport_nfc_send_r_nak(ZfNfcTransportState *state, uint8_t pcb);
 bool zf_transport_nfc_send_wtx(ZfNfcTransportState *state);
+
+/* True means the single-frame response is sent OR retained for reader retry. */
+bool zf_transport_nfc_send_recoverable_apdu_payload(ZfNfcTransportState *state,
+                                                  const uint8_t *data, size_t data_len,
+                                                  uint16_t status_word);
 void zf_transport_nfc_clear_last_iso_response(ZfNfcTransportState *state);
 bool zf_transport_nfc_replay_last_iso_response(ZfNfcTransportState *state);
 void zf_transport_nfc_clear_tx_chain(ZfNfcTransportState *state);

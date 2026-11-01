@@ -190,6 +190,8 @@ static uint8_t g_last_nfc_tx[320];
 static size_t g_last_nfc_tx_bits = 0;
 static size_t g_last_nfc_tx_len = 0;
 static size_t g_nfc_tx_count = 0;
+static NfcError g_nfc_tx_result = NfcErrorNone;
+static size_t g_ctap2_call_count = 0;
 static bool g_nfc_alloc_result = true;
 static bool g_nfc_listener_alloc_result = true;
 static size_t g_mutex_max_depth = 0;
@@ -323,6 +325,8 @@ static void test_reset(void) {
     g_last_nfc_tx_bits = 0;
     g_last_nfc_tx_len = 0;
     g_nfc_tx_count = 0;
+    g_nfc_tx_result = NfcErrorNone;
+    g_ctap2_call_count = 0;
     g_nfc_alloc_result = true;
     g_nfc_listener_alloc_result = true;
     g_mutex_max_depth = 0;
@@ -751,7 +755,7 @@ NfcError nfc_listener_tx(Nfc *nfc, const BitBuffer *buffer) {
     g_last_nfc_tx_bits = buffer->size_bits;
     g_last_nfc_tx_len = buffer->size_bytes;
     g_nfc_tx_count++;
-    return NfcErrorNone;
+    return g_nfc_tx_result;
 }
 
 void nfc_iso14443a_listener_set_col_res_data(Nfc *nfc, const uint8_t *uid, uint8_t uid_len,
@@ -1289,7 +1293,10 @@ bool furi_hal_usb_set_config(const FuriHalUsbInterface *interface, void *context
     return g_usb_set_config_result;
 }
 
-void zerofido_ui_dispatch_custom_event(ZerofidoApp *app, uint32_t event) {
+#include "zerofido_app_i.h"
+#include "zerofido_ui_i.h"
+
+void zerofido_ui_dispatch_custom_event(ZerofidoApp *app, ZfCustomEvent event) {
     UNUSED(app);
     UNUSED(event);
 }
@@ -1472,6 +1479,7 @@ bool zf_crypto_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *da
 
 size_t zerofido_handle_ctap2(ZerofidoApp *app, uint32_t cid, const uint8_t *request,
                              size_t request_len, uint8_t *response, size_t response_capacity) {
+    g_ctap2_call_count++;
     UNUSED(cid);
     if (!request || request_len == 0 || !response || response_capacity < 2) {
         return 0;
@@ -1948,6 +1956,7 @@ static void test_nfc_deinit_app(ZerofidoApp *app);
 #include "subsystems/transport/tests.inc"
 
 int main(void) {
+    test_nfc_direct_tx_failure_recovery();
     test_nfc_listener_profile_is_valid_iso14443_4a();
     test_nfc_select_applet_accepts_p2_no_fci();
     test_nfc_select_applet_returns_fido2_version_when_u2f_disabled();

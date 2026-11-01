@@ -169,7 +169,16 @@ bool zf_transport_nfc_send_frame(ZfNfcTransportState *state, const uint8_t *data
     bit_buffer_reset(state->tx_buffer);
     bit_buffer_append_bytes(state->tx_buffer, tx_data, data_len);
     iso14443_crc_append(Iso14443CrcTypeA, state->tx_buffer);
-    const bool sent = nfc_listener_tx(state->nfc, state->tx_buffer) == NfcErrorNone;
+#if defined(ZF_RELEASE_DIAGNOSTICS) && ZF_RELEASE_DIAGNOSTICS
+    const uint32_t tx_started = furi_get_tick();
+#endif
+    const NfcError tx_error = nfc_listener_tx(state->nfc, state->tx_buffer);
+    const bool sent = tx_error == NfcErrorNone;
+    if (!sent) {
+        zf_transport_nfc_trace_format("tx-fail err=%u len=%u ticks=%lu sid=%lu",
+            (unsigned)tx_error, (unsigned)data_len,
+            (unsigned long)(furi_get_tick() - tx_started), (unsigned long)state->session_id);
+    }
     if (sent) {
         state->last_tx_preserved_replay = false;
         if (zf_transport_nfc_is_replayable_iso_i_response(tx_data, data_len)) {
@@ -487,6 +496,40 @@ bool zf_transport_nfc_send_apdu_payload(ZfNfcTransportState *state, const uint8_
         zf_transport_nfc_trace_apdu_tx(data, data_len, status_word);
     }
     return sent;
+}
+
+/*
+ * A completed direct CTAP operation must not run again just because its first
+ * transmission failed. Retain the prepared I-block and let the engine remember
+ * the request as handled. R-NAK, empty-I and identical request retries can then
+ * reuse the response, even after the CTAP arena is released. The logical next
+ * PCB is committed here; replay sends the stored PCB without toggling it again.
+ * This is intentionally restricted to single-frame direct CTAP responses.
+ */
+bool zf_transport_nfc_send_recoverable_apdu_payload(ZfNfcTransportState *state,
+                                                  const uint8_t *data, size_t data_len,
+                                                  uint16_t status_word) {
+    if (!state || !state->nfc || !state->tx_buffer || (!data && data_len > 0U) ||
+        data_len > ZF_NFC_MAX_TX_FRAME_INF_SIZE - 2U) {
+        return false;
+    }
+
+    state->tx_frame_len = 0U;
+    if (zf_transport_nfc_send_apdu_payload(state, data, data_len, status_word)) {
+        return true;
+    }
+
+    const size_t expected_len = data_len + 3U + (state->iso_cid_present ? 1U : 0U);
+    if (state->tx_frame_len != expected_len ||
+        !zf_transport_nfc_is_replayable_iso_i_response(state->iso4_tx_frame, expected_len)) {
+        return false;
+    }
+    zf_transport_nfc_cache_last_iso_response(state, state->iso4_tx_frame, expected_len);
+    state->last_tx_preserved_replay = false;
+    state->iso_pcb ^= 0x01U;
+    zf_transport_nfc_trace_format("direct-retained len=%u sid=%lu", (unsigned)expected_len,
+                                  (unsigned long)state->session_id);
+    return true;
 }
 
 bool zf_transport_nfc_send_apdu_payload_preserving_replay(ZfNfcTransportState *state,
